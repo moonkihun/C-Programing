@@ -1,0 +1,488 @@
+/*
+ * [     ]<-[     ]<-[     ]<- ... <-[     ]<-[ top ]
+ *
+ * 1. 입력받은 수식 문자열을 토큰 분리하여 링크드리스트를 만든다 : tokenize()
+ * 2. 링크드리스트를 후위표현식, 전위표현식으로 순서를 바꾼다 : postfix(), prefix()
+ * 3. 순서가 바뀐 링크드리스트로, 값을 계산한다 : eval_postfix(), eval_prefix()
+ *
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define BUF_LEN 1024
+
+enum { NUM, ADD, SUB, MUL, DIV, LP, RP };
+
+typedef double RESULT;
+
+typedef struct tagElement{
+    char key[BUF_LEN];
+	int attr;
+}ELEMENT, Element, element, *pElement;
+
+typedef struct tagStack{
+	ELEMENT data;
+	struct tagStack* link;		// STACK* link
+}STACK, Stack, stack, *pStack;
+
+// 우선순위가 높을수록 큰 값을 리턴
+int priority( int attr ){
+	switch(attr){
+	case NUM:				return 1;
+	case ADD: case SUB:		return 2;
+	case MUL: case DIV:		return 3;
+	case LP: case RP:		return 4;
+	default:				return -1;
+	}
+}
+
+///////////////////////////////////////////////////////////
+//                 Stack 인터페이스                      //
+///////////////////////////////////////////////////////////
+
+// 1. 링크드리스트 공간을 할당하고
+// 2. 그곳에 item값을 집어넣고
+// 3. 그곳의 link를 top를 가리키도록함
+// 4. top는 새로 할당한곳
+void push(STACK** top, ELEMENT item)
+{
+	STACK* temp;
+	temp = (STACK *)calloc(1, sizeof(STACK)); // step 1
+	if( temp == NULL ){
+		fprintf(stderr, "error(%d) : memory allocation\n",__LINE__);
+		exit(1);
+	}
+
+	//temp->data = item;
+	item.key[BUF_LEN-1] = '\0';			// step 2
+	strcpy( temp->data.key, item.key );	// step 2
+	temp->data.attr = item.attr;				// step 2
+	temp->link = *top;					// step 3
+	*top = temp;						// step 4
+}
+
+// 1. top가 기리키는 링크드리스트의 내용을 item에 저장하고
+// 2. top를 top의 link로 바꾸고
+// 3. 이전의 top를 해제
+int pop(STACK** top, ELEMENT* item)
+{
+	STACK* temp = *top;
+	if( temp ==NULL ){
+		// stack is empty
+		return 0;
+	}
+
+	//item->key = temp->key;
+	if( item == NULL ){
+		*top = temp->link;
+		free(temp);
+	}
+	else{
+		strcpy( item->key, temp->data.key );	// step 1
+		item->attr = temp->data.attr;			// step 1
+		*top = temp->link;			// step 2
+		free(temp);			// step 3
+	}
+	return 1;
+}
+
+// top이 가리키는 element를 item에 복사
+int peek(STACK* top, ELEMENT* item)
+{
+	if( top == NULL ){
+		return 0;
+	}
+	else{
+		//*item = top->data;
+		strcpy( item->key, top->data.key );
+		item->attr = top->data.attr;
+		return 1;
+	}
+}
+
+
+///////////////////////////////////////////////////////////
+//               문자열을 링크드리스트로                 //
+///////////////////////////////////////////////////////////
+void tokenize(STACK** top, char *expr)
+{
+	int i = -1;
+	ELEMENT item;
+	item.attr = -1;
+	int is_white = 0;
+	int is_point = 0;
+	char buf[BUF_LEN];
+	int j = 0;
+	
+	while( expr[++i] != '\0' ){
+		if( expr[i] == ' ' || expr[i] == '\t' ){
+			is_white = 1;
+			continue;
+		}
+		if( ('0'<= expr[i] && expr[i]<='9')||(expr[i]=='.' && (is_point = 1))) {
+			if( is_white == 1 && item.attr == NUM ){ // the expression of white-space between number and number is invalid form of expression
+				printf("invalid expression\n");
+				printf(" expr : %s\n",expr);
+				printf("         %*c\n",i,'^');
+				exit(1);
+			}
+			buf[j++] = expr[i];
+			item.attr = NUM;
+		}
+		else{
+			if( item.attr==NUM && (expr[i]<'0'||'9'<expr[i])){
+				buf[j++] = '\0';
+				strcpy(item.key, buf);
+				push(top, item);
+				is_point = 0;
+				j=0;
+			}
+			switch( expr[i] ){
+				case '+': item.attr = ADD; break;
+				case '-': item.attr = SUB; break;
+				case '*': item.attr = MUL; break;
+				case '/': item.attr = DIV; break;
+				case '(': item.attr = LP; break;
+				case ')': item.attr = RP; break;
+                case '\n': break;
+				default:
+					printf("unexpected operator \'%c\'\n",expr[i]);
+					exit(1);
+			}
+			buf[0] = expr[i];
+			buf[1] = '\0';
+			strcpy(item.key, buf);
+			push(top, item);
+		}
+
+		is_white = 0;
+	}
+	if(item.attr == NUM){
+		buf[j++] = '\0';
+		strcpy(item.key, buf);
+		push(top, item);
+	}
+}
+
+///////////////////////////////////////////////////////////
+//                  링크드리스트 출력                    //
+///////////////////////////////////////////////////////////
+void print_list(STACK* cur){
+static char attr[][5] = {
+	"NUM","ADD","SUB","MUL","DIV","LP","RP"
+};
+	if(cur == NULL){
+		return ;
+	}
+	print_list(cur->link);
+	printf("[%s] ", cur->data.key);
+//printf("\n%5s : %s", attr[cur->data.attr],cur->data.key);
+	return;
+}
+
+
+///////////////////////////////////////////////////////////
+//                후위표현식으로 바꾸기                  //
+///////////////////////////////////////////////////////////
+
+/* 
+ * 1. cur이 NUM이면, post에 push
+ * 2. cur이 ADD,SUB,MUL,DIV이면, bucket 검사
+ * 	  bucket가 빌때까지 혹은 LP가 나올때까지
+ *    bucket의 peek가 지금 연산자보다 우선순위가 높으면
+ *    pop(bucket, item), push(post, bucket)
+ *    그리고 push(bucket, cur.item)
+ * 3. cur이 LP이면, push(bucket, cur.item)
+ * 4. cur이 RP이면, bucket가 비거나 .LP가 나올때까지 pop(bucket,item), push(post,item)
+ * 5. cur이 NULL이면, bucket이 빌때까지 pop(bucket,item), push(post,item)
+ */
+void postfix(STACK** cur, STACK** post)
+{
+	static STACK* bucket;
+	static int end = 0;
+	ELEMENT item;
+
+	if( *cur == NULL ){
+		end--;
+		return ;
+	}
+	end++;	
+	postfix(&((*cur)->link), post);
+	switch( (*cur)->data.attr ){
+	case NUM:
+		push( post, (*cur)->data );
+		break;
+	case ADD: case SUB: case MUL: case DIV:
+		if( peek(bucket,&item) && ( priority(item.attr) > priority((*cur)->data.attr) ) ) {
+			while( peek(bucket,&item) && (item.attr!= LP)){
+				pop( &bucket, &item);
+				push( post, item);
+			}
+		}
+		push( &bucket, (*cur)->data );
+		break;
+	case LP:
+		push( &bucket, (*cur)->data );
+		break;
+	case RP:
+		while( peek(bucket,&item)&&(item.attr!=LP||(!pop(&bucket,NULL))) ){
+			pop( &bucket, &item);
+			push( post, item);
+		}
+		break;
+	default:
+		printf("unexpected operator(%d)\n",__LINE__);
+		exit(1);
+	}
+	if( end < 1){
+		while( peek(bucket,&item) ){
+			pop( &bucket, &item );
+			push( post, item);
+		}
+	}
+	end--;
+}
+
+
+///////////////////////////////////////////////////////////
+//                전위표현식으로 바꾸기                  //
+///////////////////////////////////////////////////////////
+void prefix(STACK** cur, STACK** pre)
+{
+	int i=0;
+	static STACK* bucket;
+	static STACK* temp;
+	static int end = 0;
+	ELEMENT item;
+
+	if( *cur == NULL ){
+
+		while( peek(*pre, &item) ){
+			pop( pre, &item );
+			push( &temp, item );
+		}
+		while( peek(bucket, &item) ){
+			pop( &bucket, &item );
+			push( &temp, item );
+		}
+		while( peek(temp, &item) ){
+			pop( &temp, &item );
+			push( pre, item );
+		}
+
+		return ;
+	}
+	
+	switch( (*cur)->data.attr ){
+	case NUM:
+		while( peek(*pre, &item) ){
+			pop( pre, &item );
+			push( &temp, item );
+		}
+		push( pre, (*cur)->data );
+		while( peek(temp, &item) ){
+			pop( &temp, &item );
+			push( pre, item );
+		}
+		break;
+	case ADD: case SUB: case MUL: case DIV:
+/*
+1. pre에서 temp로 다뺀다
+2. 연산자 넣는다
+3. pre를 다시 temp에서 넣는다
+*/
+		//printf("operator\n");
+		while( peek(*pre, &item) ){
+			pop( pre, &item );
+			push( &temp, item);
+		}
+		while( peek(bucket,&item) && (priority(item.attr) > priority((*cur)->data.attr)&&(item.attr!=RP))){
+			pop( &bucket, &item );
+			push( pre, item );
+		}
+		
+		push( &bucket, (*cur)->data );
+		while( peek(temp,&item) && (item.attr != RP) ){
+			pop( &temp, &item);
+			push( pre, item);
+		}
+		break;
+	case RP:
+		push( &bucket, (*cur)->data );
+		break;
+	case LP:
+		while( peek(*pre,&item) ){
+			pop( pre, &item );
+			push( &temp, item );
+		}
+		while( peek(bucket,&item)&&(item.attr!=RP||(!pop(&bucket,NULL))) ){
+			pop( &bucket, &item);
+			push( &temp, item);
+		}
+		while( peek(temp, &item) ){
+			pop( &temp, &item );
+			push( pre, item );
+		}
+		break;
+	default:
+		printf("unexpected operator\n");
+		exit(1);
+	}
+	prefix(&((*cur)->link), pre);
+}
+
+
+///////////////////////////////////////////////////////////
+//                   후위표현식 계산                     //
+///////////////////////////////////////////////////////////
+const float eval_postfix(STACK** post)
+{
+	static STACK* bucket;
+	ELEMENT item;
+	static int end = 0;
+	char var1[BUF_LEN], var2[BUF_LEN];
+    return atof(item.key);
+	if( !peek(*post,&item) ){
+		end--;
+        printf("2\n");
+        exit(1);
+	}
+	end++;
+	
+	eval_postfix(&((*post)->link));
+	
+	pop(post,&item);
+	switch( item.attr ){
+	case NUM:
+		push(&bucket,item);
+		break;
+	case ADD:
+		pop(&bucket, &item); strcpy(var1,item.key);
+		pop(&bucket, &item); strcpy(var2,item.key);
+		sprintf(item.key,"%f",atof(var1) + atof(var2));
+		push(&bucket,item);
+		break;
+	case SUB:
+		pop(&bucket, &item); strcpy(var1,item.key);
+		pop(&bucket, &item); strcpy(var2,item.key);
+		sprintf(item.key,"%f",atof(var2) - atof(var1));
+		push(&bucket,item);
+		break;
+	case MUL:
+		pop(&bucket, &item); strcpy(var1,item.key);
+		pop(&bucket, &item); strcpy(var2,item.key);
+		sprintf(item.key,"%f",atof(var1) * atof(var2));
+		push(&bucket,item);
+		break;
+	case DIV:
+		pop(&bucket, &item); strcpy(var1,item.key);
+		pop(&bucket, &item); strcpy(var2,item.key);
+		if(-0.00000001<atof(var1)&&atof(var1)<0.00000001){
+			printf("a number less than 0.00000001 can't be divider\n");
+			exit(1);
+		}
+		sprintf(item.key,"%f",atof(var2) / atof(var1));
+		push(&bucket,item);
+		break;
+	}
+	if( end<1 ){
+		pop(&bucket, &item);
+		return atof(item.key);
+        exit(1);
+	}
+ 
+	end--;
+    return 0;
+
+}
+
+
+const float eval_prefix(STACK** pre)
+{
+	static STACK* bucket;
+	ELEMENT item;
+    char* var1=malloc(sizeof(char)*BUF_LEN);
+    char* var2=malloc(sizeof(char)*BUF_LEN);
+	
+	while( peek(*pre,&item) ){
+		pop(pre,&item);
+		switch( item.attr ){
+		case NUM:
+			push(&bucket,item);
+			break;
+		case ADD:
+			pop(&bucket, &item); strcpy(var1,item.key);
+			pop(&bucket, &item); strcpy(var2,item.key);
+			sprintf(item.key,"%f",atof(var1) + atof(var2));
+			push(&bucket,item);
+			break;
+		case SUB:
+			pop(&bucket, &item); strcpy(var1,item.key);
+			pop(&bucket, &item); strcpy(var2,item.key);
+			sprintf(item.key,"%f",atof(var1) - atof(var2));
+			push(&bucket,item);
+			break;
+		case MUL:
+			pop(&bucket, &item); strcpy(var1,item.key);
+			pop(&bucket, &item); strcpy(var2,item.key);
+			sprintf(item.key,"%f",atof(var1) * atof(var2));
+			push(&bucket,item);
+			break;
+		case DIV:
+			pop(&bucket, &item); strcpy(var1,item.key);
+			pop(&bucket, &item); strcpy(var2,item.key);
+			if(-0.00000001<atof(var2)&&atof(var2)<0.00000001){
+				printf("a number less than 0.00000001 can't be divider\n");
+				exit(1);
+			}
+			sprintf(item.key,"%f",atof(var1) / atof(var2));
+			push(&bucket,item);
+			break;
+		}
+	}
+	pop(&bucket, &item);
+	return atof(item.key);
+}
+
+
+int main( int argc, char *argv[])
+{
+        printf("========Welcome to infinite Calculator==========\n");
+        printf("Enter the expression in infix notation\n");
+
+        char* expr;
+        expr=malloc(sizeof(char)*BUF_LEN);
+        FILE *fps;
+
+        fps=fopen("input","r");
+        fgets(expr,BUF_LEN,fps);
+        fclose(fps);
+
+	//char expr[BUF_LEN] = "( (( 42 -(2-9.2)  / 3.3  +2.1)*2)/0.1) ";
+	//char expr[BUF_LEN] = "((22-5)*6)";
+	//char expr[BUF_LEN] = "879-2*(5-2)";
+	//char expr[BUF_LEN] = "2*3+4/5";
+	//char expr[BUF_LEN] = "3.14 + 3*2.3-2/3 ";
+	//char expr[BUF_LEN] = "3.14 + 3*(2.3-2/3) ";
+	//char expr[BUF_LEN] = "47 - 3*(21 -2 *3)"; // answer = 2
+	Stack *st = NULL;
+	Stack *post = NULL, *pre = NULL;
+	tokenize(&st, expr);	// *st 가 NULL 이면 st는 head
+	postfix(&st, &post);
+	prefix(&st, &pre);
+	printf("Input: %s",expr);
+   // eval_prefix(&pre);
+	//printf("  original expr : "); print_list(st); printf("\n");
+	printf("postfix expr : ");
+    print_list(post);printf("\n");eval_prefix(&pre);
+	//printf("  prefix result : %lf\n", eval_prefix(&pre));
+    printf("postfix result : %lf\n", eval_postfix(&post));
+	
+
+	return 0;
+}
+
+
+
